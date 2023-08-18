@@ -4,16 +4,10 @@ use serde_json::Value;
 use std::error::Error;
 use std::fs::File;
 use std::io::BufWriter;
-use std::io::Read;
+use std::thread;
+use std::time::Duration;
 
-fn read_file(path: String) -> String {
-    let mut file = File::open(path).unwrap();
-    let mut data = String::new();
-    file.read_to_string(&mut data).unwrap();
-    data
-}
-
-async fn get_response(input_path: &str) -> Result<(), Box<dyn Error>> {
+async fn get_result_url(input_path: &str) -> Result<String, Box<dyn Error>> {
     let file = tokio::fs::File::open(input_path).await?;
     let client = reqwest::Client::new();
     let url = "https://quality-test-ocr.cognitiveservices.azure.com/vision/v3.2/read/analyze";
@@ -24,19 +18,70 @@ async fn get_response(input_path: &str) -> Result<(), Box<dyn Error>> {
         .header("Content-Type", "application/octet-stream")
         .header(
             "Ocp-Apim-Subscription-Key",
-            "{key}",
+            "6670bf7bedfa4e1c837384056c261180",
         )
         .send()
         .await?;
 
-    println!("{:?}", response);
+    let headers = response.headers();
+    let result_url = headers["Operation-Location"].to_str().unwrap();
 
-    Ok(())
+    println!("result url: {}", result_url);
+
+    Ok(result_url.to_string())
 }
 
-fn response_to_pdf(input_path: &str, output_path: &str) -> Result<(), Box<dyn Error>> {
-    let data = read_file(input_path.to_string());
-    let value: Value = serde_json::from_str(&data).unwrap();
+async fn get(url: String, output_path: &str) -> Result<(), Box<dyn Error>> {
+    loop {
+        let response = get_response(url.clone()).await?;
+        let status = response.status();
+
+        if !status.is_success() {
+            // status != 200~299
+            println!("{:?}", response);
+            panic!("response code is {}", status);
+        } else {
+            // status == 200~299
+            let body = response.text().await?;
+            let value: Value = serde_json::from_str(&body).unwrap();
+            let status = value["status"].as_str().unwrap();
+
+            match status {
+                "notStarted" | "running" => {
+                    println!("Status is {}", status);
+                    println!("Waiting 10 secs......");
+                    thread::sleep(Duration::from_secs(10));
+                }
+                "failed" => {
+                    panic!("OCR failed: {}", body);
+                }
+                "succeeded" => {
+                    println!("OCR succeeded");
+                    response_to_pdf(&body, output_path)?;
+                    return Ok(());
+                }
+                _ => {
+                    panic!("Unexpected status: {}", body);
+                }
+            }
+        }
+    }
+}
+
+async fn get_response(url: String) -> Result<reqwest::Response, Box<dyn Error>> {
+    let client = reqwest::Client::new();
+    let request_builder = client.get(url.clone()).header(
+        "Ocp-Apim-Subscription-Key",
+        "6670bf7bedfa4e1c837384056c261180",
+    );
+
+    let response = request_builder.send().await?;
+
+    Ok(response)
+}
+
+fn response_to_pdf(response_json: &str, output_path: &str) -> Result<(), Box<dyn Error>> {
+    let value: Value = serde_json::from_str(response_json).unwrap();
 
     let (doc, page1, layer1) =
         PdfDocument::new("PDF_Document_title", Mm(210.0), Mm(297.0), "Layer 1");
@@ -76,7 +121,13 @@ fn response_to_pdf(input_path: &str, output_path: &str) -> Result<(), Box<dyn Er
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    get_response("ocr.pdf").await?;
-    //response_to_pdf("response.json", "test_fonts.pdf")?;
+    let file_name = "ocr.pdf";
+    let url = get_result_url(file_name).await?;
+
+    println!("Waiting 10 secs......");
+    thread::sleep(Duration::from_secs(10));
+
+    get(url, &format!("out_{}", file_name)).await?;
+
     Ok(())
 }
