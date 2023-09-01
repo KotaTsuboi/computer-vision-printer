@@ -2,12 +2,16 @@ extern crate printpdf;
 use printpdf::*;
 use serde_json::Value;
 use std::error::Error;
+use std::fs;
 use std::fs::File;
 use std::io::BufWriter;
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-async fn get_result_url(input_path: &str) -> Result<String, Box<dyn Error>> {
+static SUBSCRIPTION_KEY: &str = "6670bf7bedfa4e1c837384056c261180";
+
+async fn get_result_url(input_path: &PathBuf) -> Result<String, Box<dyn Error>> {
     let file = tokio::fs::File::open(input_path).await?;
     let client = reqwest::Client::new();
     let url = "https://quality-test-ocr.cognitiveservices.azure.com/vision/v3.2/read/analyze";
@@ -16,10 +20,7 @@ async fn get_result_url(input_path: &str) -> Result<String, Box<dyn Error>> {
         .post(url)
         .body(reqwest::Body::from(file))
         .header("Content-Type", "application/octet-stream")
-        .header(
-            "Ocp-Apim-Subscription-Key",
-            "6670bf7bedfa4e1c837384056c261180",
-        )
+        .header("Ocp-Apim-Subscription-Key", SUBSCRIPTION_KEY)
         .send()
         .await?;
 
@@ -70,10 +71,9 @@ async fn get(url: String, output_path: &str) -> Result<(), Box<dyn Error>> {
 
 async fn get_response(url: String) -> Result<reqwest::Response, Box<dyn Error>> {
     let client = reqwest::Client::new();
-    let request_builder = client.get(url.clone()).header(
-        "Ocp-Apim-Subscription-Key",
-        "6670bf7bedfa4e1c837384056c261180",
-    );
+    let request_builder = client
+        .get(url.clone())
+        .header("Ocp-Apim-Subscription-Key", SUBSCRIPTION_KEY);
 
     let response = request_builder.send().await?;
 
@@ -119,15 +119,42 @@ fn response_to_pdf(response_json: &str, output_path: &str) -> Result<(), Box<dyn
     Ok(())
 }
 
+fn list_file(input_dir: &str) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let paths = fs::read_dir(input_dir).unwrap();
+    let mut result: Vec<PathBuf> = Vec::new();
+
+    for dir_entry in paths {
+        let dir_entry = dir_entry?;
+
+        if dir_entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let file_path = dir_entry.path();
+
+        if file_path.extension().unwrap() != "pdf" {
+            continue;
+        }
+
+        result.push(file_path);
+    }
+
+    Ok(result)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let file_name = "ocr.pdf";
-    let url = get_result_url(file_name).await?;
+    let paths = list_file("input")?;
 
-    println!("Waiting 10 secs......");
-    thread::sleep(Duration::from_secs(10));
+    for path in paths {
+        let url = get_result_url(&path).await?;
 
-    get(url, &format!("out_{}", file_name)).await?;
+        println!("Waiting 10 secs......");
+        thread::sleep(Duration::from_secs(10));
+
+        let file_name = path.file_name().unwrap().to_str().unwrap();
+        get(url, &format!("output/{}", file_name)).await?;
+    }
 
     Ok(())
 }
